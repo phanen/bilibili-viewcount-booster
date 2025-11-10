@@ -1,0 +1,26 @@
+[project]
+name = "bilibili-viewcount-booster"
+version = "0.1.0"
+description = "A tool to boost Bilibili video view counts using proxy validation pipeline"
+requires-python = ">=3.8"
+dependencies = ["requests>=2.31.0", "fake-useragent>=1.5.1", "rich>=13.7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.ruff]
+line-length = 120
+exclude = [".git", ".venv", "__pycache__", "*.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E722"]        # Allow bare except for simplicity
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["bilibili-viewcount-booster"]

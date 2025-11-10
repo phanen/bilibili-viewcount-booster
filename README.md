@@ -1,56 +1,99 @@
-使用[代理池](https://checkerproxy.net/getAllProxy)对目标视频进行轮询点击，视作游客观看，速度约为8播放量/分钟
+# Bilibili View Count Booster
 
-B站目前(2024-03-30)限制同一IP对视频点击间隔大于5min，所以代理轮询完后如果不足5min会继续等待
+Modified from [liqwang/bilibili-viewcount-booster](https://github.com/liqwang/bilibili-viewcount-booster) via AI.
 
-<br>
+A non-blocking pipeline tool to boost Bilibili video view counts using proxy validation.
 
-## 使用方法
-#### 有Python环境
+## Installation
+
 ```shell
-> git clone https://github.com/liqwang/bilibili-viewcount-booster.git
-> cd bilibili-viewcount-booster
-> pip install -r requirements.txt
-> python booster.py <BV号> <目标播放数>
+git clone https://github.com/your-username/bilibili-viewcount-booster
+cd bilibili-viewcount-booster
+uv sync
 ```
 
-#### 无Python环境
-1. 在[Release界面](https://github.com/liqwang/bilibili-viewcount-booster/releases/latest)下载与系统对应的文件
-2. 重命名为`booster`(Windows为`booster.exe`)
-3. 在终端中进入所在目录
+## Configuration
+
+### Option 1: Using .env file (Recommended)
+
+Create a `.env` file to store your private configuration:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```bash
+# Bilibili User Configuration
+BILIBILI_USER_MID=123456
+
+# Path to cookies file (Netscape format)
+BILIBILI_COOKIES_FILE=cookies.txt
+
+# Default increment for boost operations
+DEFAULT_INCREMENT=50
+```
+
+With `.env` configured, you can run commands without arguments:
+```bash
+# This will use values from .env
+uv run python boost_author.py
+uv run python fetch_author_videos.py
+```
+
+### Option 2: Command line arguments
+
+You can always override `.env` values with command line arguments.
+
+## Usage
+
+### Boost a Single Video
+
 ```shell
-> chmod +x booster (macOS/Linux的额外步骤)
-> ./booster <BV号> <目标播放数>
-```
-> [!NOTE]
-> macOS可能会遇到「无法打开"booster"，因为Apple无法检查其是否包含恶意软件」的报错，[参考解决方式](https://support.apple.com/zh-cn/guide/mac-help/mchleab3a043/mac)
-
-<br>
-
-## 运行效果
-```
-> ./booster BV1fz421o8J7 349
-
-getting proxies from https://checkerproxy.net/api/archive/2024-03-29 ...
-successfully get 2624 proxies
-
-filtering active proxies using http://httpbin.org/post ...
-2624/2624 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0%   
-successfully filter 165 active proxies using 4min 36s
-
-start boosting BV1fz421o8J7 at 20:27:40
-Initial view count: 298
-361/349 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ [Hits: 697, Views+: 63] done                    
-Finish at 20:58:00
-Statistics:
-- Initial views: 298
-- Final views: 361
-- Total increase: 63
-- Successful hits: 697
-- Success rate: 43.80%
+uv run python booster.py <BVID> <INCREMENT>
 ```
 
-<br>
+### Fetch All Videos from an Author
 
-## 参考
-https://github.com/xu0329/bilibili_proxy
-  
+```shell
+# Using .env
+uv run python fetch_author_videos.py
+
+# Using command line
+uv run python fetch_author_videos.py <USER_MID> --cookies cookies.txt
+
+# Save to file
+uv run python fetch_author_videos.py <USER_MID> --cookies cookies.txt --output videos.json
+
+# Limit results
+uv run python fetch_author_videos.py <USER_MID> --cookies cookies.txt --max 10
+```
+
+### Boost All Videos from an Author
+
+```shell
+# Using .env
+uv run python boost_author.py
+
+# Using command line
+uv run python boost_author.py <USER_MID> <INCREMENT> --cookies cookies.txt
+
+# Dry run (preview only)
+uv run python boost_author.py <USER_MID> <INCREMENT> --dry-run
+```
+
+## How It Works
+1. Fetches proxies from API and queues for validation
+2. Validates proxies (75 threads) against httpbin.org
+3. Uses valid proxies to boost views (50 threads)
+4. Each proxy waits 5 minutes before reuse
+
+## References
+
+- https://github.com/xu0329/bilibili_proxy
+- https://github.com/SocialSisterYi/bilibili-API-collect
+- https://github.com/liqwang/bilibili-viewcount-booster
+
+## License
+
+MIT
