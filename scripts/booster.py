@@ -5,7 +5,6 @@ import sys
 import threading
 from datetime import date, datetime, timedelta
 from queue import Queue
-from time import sleep
 
 import requests
 
@@ -370,8 +369,6 @@ with tracker.progress_context():
 
     # Monitor loop
     while True:
-        sleep(0.5)
-
         # Update validation progress
         stats = validator.get_stats()
         if hasattr(tracker, 'progress') and tracker.progress:
@@ -406,7 +403,6 @@ with tracker.progress_context():
 # 6. Stop workers
 validator.stop()
 dispatcher.stop()
-sleep(1)
 
 # 7. Summary
 results = []
@@ -420,6 +416,7 @@ for booster in video_boosters:
             'final': progress['current'],
             'increment': progress['increment'],
             'hits': progress['hits'],
+            'elapsed': progress['elapsed'],
         }
     )
 # 8. Final summary

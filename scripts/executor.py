@@ -80,6 +80,8 @@ class VideoBooster:
         self.proxy_cooldowns = {}  # {proxy: last_used_timestamp}
         self.lock = threading.Lock()
         self.completed = False
+        self.start_time = datetime.now()
+        self.end_time = None
 
     def can_use_proxy(self, proxy):
         """Check if proxy can be used (not in cooldown)."""
@@ -135,11 +137,21 @@ class VideoBooster:
     def is_complete(self):
         """Check if target is reached."""
         with self.lock:
-            return (self.current_view - self.initial_view) >= self.target_increment
+            is_done = (self.current_view - self.initial_view) >= self.target_increment
+            if is_done and not self.completed:
+                self.end_time = datetime.now()
+                self.completed = True
+            return is_done
 
     def get_progress(self):
         """Get current progress."""
         with self.lock:
+            elapsed = 0
+            if self.end_time:
+                elapsed = int((self.end_time - self.start_time).total_seconds())
+            elif self.completed:
+                elapsed = int((datetime.now() - self.start_time).total_seconds())
+
             return {
                 'bv_id': self.bv_id,
                 'current': self.current_view,
@@ -148,6 +160,7 @@ class VideoBooster:
                 'target': self.target_increment,
                 'hits': self.hits,
                 'completed': self.completed,
+                'elapsed': elapsed,
             }
 
 
