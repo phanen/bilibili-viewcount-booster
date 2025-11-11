@@ -3,45 +3,14 @@ name: Reusable Bilibili Boost
 on:
   workflow_call:
     inputs:
-      user_mid:
-        description: "Bilibili User MID (optional, falls back to secret)"
-        required: false
-        type: string
-      increment:
-        description: "Increment per video"
-        required: false
-        type: number
-        default: 50
-      validators:
-        description: "Number of validator threads"
-        required: false
-        type: number
-        default: 75
-      workers:
-        description: "Number of worker threads"
-        required: false
-        type: number
-        default: 50
-      cooldown:
-        description: "Proxy cooldown time in seconds"
-        required: false
-        type: number
-        default: 300
-      blacklist:
-        description: "Comma-separated list of BV IDs to exclude"
-        required: false
-        type: string
-        default: ""
-    secrets:
-      user_mid_secret:
-        description: "Bilibili User MID from secrets"
+      cli_flags:
+        description: "Custom CLI flags to pass to booster.py (e.g., '--mid 123456 --increment 100 --validators 80')"
         required: true
+        type: string
+    secrets:
       cookies:
         description: "Bilibili cookies in Netscape format"
         required: true
-      proxy_url:
-        description: "Custom proxy source URL"
-        required: false
 
 jobs:
   boost:
@@ -72,14 +41,8 @@ jobs:
       - name: Run booster
         run: |
           uv run python scripts/booster.py \
-            --mid "${{ inputs.user_mid != '' && inputs.user_mid || secrets.user_mid_secret }}" \
-            --increment ${{ inputs.increment }} \
-            --validators ${{ inputs.validators }} \
-            --workers ${{ inputs.workers }} \
-            --cooldown ${{ inputs.cooldown }} \
             --cookies cookies.txt \
-            ${{ inputs.blacklist && format('--blacklist {0}', inputs.blacklist) || '' }} \
-            ${{ secrets.proxy_url && format('--proxy-url {0}', secrets.proxy_url) || '' }}
+            ${{ inputs.cli_flags }}
 
       - name: Upload logs
         if: always()
