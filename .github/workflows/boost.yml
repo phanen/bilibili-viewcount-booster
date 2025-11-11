@@ -39,6 +39,8 @@ jobs:
         run: printf %s "${{ secrets.cookies }}" > cookies.txt
 
       - name: Run booster
+        # https://github.com/orgs/community/discussions/50481
+        timeout-minutes: 20
         run: |
           uv run python scripts/booster.py \
             --cookies cookies.txt \
