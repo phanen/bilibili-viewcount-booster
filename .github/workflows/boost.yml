@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout booster repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: phanen/bilibili-viewcount-booster
           ref: main
