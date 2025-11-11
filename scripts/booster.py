@@ -15,7 +15,6 @@ from fake_useragent import UserAgent
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
-
 from utils import load_env_file, time_format
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -80,7 +79,7 @@ Examples:
     )
 
     # Video selection (mutually exclusive)
-    video_group = parser.add_mutually_exclusive_group(required=True)
+    video_group = parser.add_mutually_exclusive_group(required=False)
     video_group.add_argument(
         'bv', nargs='?', default=get_config('BV_ID'), help='Single Bilibili video BV ID (e.g., <BVID>)'
     )
@@ -91,13 +90,17 @@ Examples:
         'increment',
         nargs='?',
         type=int,
-        default=int(get_config('TARGET_VIEWS', 0)),
+        default=int(get_config('DEFAULT_INCREMENT', 0)),
         help='View count increment for single video mode',
     )
     parser.add_argument(
         '--increment', type=int, dest='increment_flag', help='View count increment for --bvids or --mid mode'
     )
-    parser.add_argument('--cookies', help='Path to cookies file for fetching user videos (required with --mid)')
+    parser.add_argument(
+        '--cookies',
+        default=get_config('BILIBILI_COOKIES_FILE'),
+        help='Path to cookies file for fetching user videos (required with --mid)',
+    )
 
     proxy_group = parser.add_mutually_exclusive_group()
     proxy_group.add_argument(
@@ -137,6 +140,10 @@ Examples:
 
     args = parser.parse_args()
 
+    # Handle --mid from .env if not provided via CLI
+    if not args.mid and get_config('BILIBILI_USER_MID'):
+        args.mid = int(get_config('BILIBILI_USER_MID'))
+
     # Merge increment from both sources
     if args.increment_flag:
         args.increment = args.increment_flag
@@ -145,7 +152,7 @@ Examples:
     if not args.bv and not args.bvids and not args.mid:
         parser.error('Video selection required: provide bv, --bvids, or --mid (or set BV_ID in env)')
     if not args.increment:
-        parser.error('Target view count is required (provide via CLI, env var TARGET_VIEWS, or .env file)')
+        parser.error('Target increment view count is required (provide via CLI, env var or .env file)')
     if args.mid and not args.cookies:
         parser.error('--cookies is required when using --mid')
 
@@ -383,22 +390,31 @@ for video_idx, bv in enumerate(bv_ids, 1):
     # 4. Start the pipeline with Rich progress bars
     start_pipeline_time = datetime.now()
 
-with Progress(
-    SpinnerColumn(),
-    TextColumn('[progress.description]{task.description}'),
-    BarColumn(),
-    TaskProgressColumn(),
-    TextColumn('[cyan]{task.fields[status]}[/cyan]'),
-    console=console,
-    transient=False,
-) as _progress:
-    # Set global progress references
-    _progress_obj = _progress
+    with Progress(
+        SpinnerColumn(),
+        TextColumn('[progress.description]{task.description}'),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn('[cyan]{task.fields[status]}[/cyan]'),
+        console=console,
+        transient=False,
+    ) as _progress:
+        # Set global progress references
+        _progress_obj = _progress
 
-    # Create progress tasks (no fixed total for validation since we loop)
-    _fetch_task = _progress.add_task('[yellow]Fetching proxies', total=len(total_proxies), status='')
-    _validate_task = _progress.add_task('[blue]Validating proxies', total=None, status='')
-    _consume_task = _progress.add_task('[green]Boosting views', total=increment_target, status='')
+        # Create progress tasks
+        if len(bv_ids) > 1:
+            _video_task = _progress.add_task(
+                '[magenta]Processing videos', total=len(bv_ids), status=f'Video {video_idx}/{len(bv_ids)}: {bv}'
+            )
+        else:
+            _video_task = None
+
+        _fetch_task = _progress.add_task('[yellow]Fetching proxies', total=len(total_proxies), status='')
+        _validate_task = _progress.add_task('[blue]Validating proxies', total=None, status='')
+        _consume_task = _progress.add_task(
+            f'[green]Boosting {bv}', total=increment_target, status=f'Target: +{increment_target}'
+        )
 
     # Start validator threads
     validator_threads = []
@@ -466,6 +482,8 @@ with Progress(
                         completed=increment_target,
                         status=f'✓ Target reached! {current} (+{current_increment})',
                     )
+                    if _video_task is not None:
+                        _progress_obj.update(_video_task, completed=video_idx, status=f'✓ {bv} complete')
                     target_reached = True
                     stop_event.set()
                     break
@@ -490,6 +508,8 @@ with Progress(
         completed=min(current_increment, increment_target),
         status=f'✓ Done. {current} (+{current_increment})',
     )
+    if _video_task is not None and not target_reached:
+        _progress_obj.update(_video_task, completed=video_idx, status=f'⚠ {bv} incomplete')
 
     pipeline_cost_seconds = int((datetime.now() - start_pipeline_time).total_seconds())
 

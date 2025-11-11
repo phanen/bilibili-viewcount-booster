@@ -1,0 +1,50 @@
+# Example workflow for your PRIVATE repo
+# Copy this to: .github/workflows/daily-boost.yml in your private repo
+
+name: Daily Video Boost
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Every day at 00:00 UTC (8:00 AM Beijing)
+
+  workflow_dispatch:
+    inputs:
+      user_mid:
+        description: "User MID (leave empty to use default from secrets)"
+        required: false
+        type: string
+      increment:
+        description: "Increment per video"
+        required: false
+        type: number
+        default: 50
+      validators:
+        description: "Number of validator threads"
+        required: false
+        type: number
+        default: 75
+      workers:
+        description: "Number of worker threads"
+        required: false
+        type: number
+        default: 50
+      cooldown:
+        description: "Proxy cooldown time in seconds"
+        required: false
+        type: number
+        default: 300
+
+# https://stackoverflow.com/questions/66113900/github-actions-not-receiving-secrets
+jobs:
+  boost:
+    uses: phanen/bilibili-viewcount-booster/.github/workflows/boost.yml@main
+    with:
+      user_mid: ${{ inputs.user_mid }}
+      increment: ${{ inputs.increment || 50 }}
+      validators: ${{ inputs.validators || vars.VALIDATORS || 75 }}
+      workers: ${{ inputs.workers || vars.WORKERS || 50 }}
+      cooldown: ${{ inputs.cooldown || vars.COOLDOWN || 300 }}
+    secrets:
+      user_mid_secret: ${{ secrets.BILIBILI_USER_MID }}
+      cookies: ${{ secrets.BILIBILI_COOKIES }}
+      proxy_url: ${{ secrets.PROXY_URL }}
