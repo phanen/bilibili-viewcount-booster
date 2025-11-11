@@ -5,12 +5,9 @@ import time
 import urllib.parse
 from functools import reduce
 from hashlib import md5
-from pathlib import Path
 
 import requests
-
 from utils import load_env
-
 
 # WBI signing constants
 MIXIN_KEY_ENC_TAB = [
@@ -117,7 +114,11 @@ def init_session():
     session = requests.Session()
     session.headers.update(
         {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
             'Referer': 'https://www.bilibili.com/',
             'Origin': 'https://www.bilibili.com',
         }

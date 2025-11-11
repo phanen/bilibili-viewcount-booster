@@ -2,12 +2,16 @@
 
 Modified from [liqwang/bilibili-viewcount-booster](https://github.com/liqwang/bilibili-viewcount-booster) via AI.
 
-A non-blocking pipeline tool to boost Bilibili video view counts using proxy validation.
+A non-blocking pipeline tool to boost Bilibili video view counts using validated proxies.
 
-1. Fetches proxies from API and queues for validation
-2. Validates proxies (75 threads) against httpbin.org
-3. Uses valid proxies to boost views (50 threads)
-4. Each proxy waits 5 minutes before reuse
+## How It Works
+
+This tool simulates video views by sending HTTP POST requests to Bilibili's video playback API through validated proxy servers:
+
+1. **Fetch Proxies** - Downloads free proxy lists from public sources
+2. **Validate Proxies** - Tests each proxy against httpbin.org to filter working ones
+3. **Boost Views** - Sends video view requests through valid proxies
+4. **Cooldown Management** - Each proxy waits 5 minutes before reuse to avoid rate limiting
 
 ## Installation
 
