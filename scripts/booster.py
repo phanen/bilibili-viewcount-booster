@@ -11,6 +11,7 @@ import requests
 
 # Disable SSL warnings for expired certificates
 import urllib3
+from executor import JobDispatcher, ProxyValidator, VideoBooster
 from fake_useragent import UserAgent
 from progress_tracker import get_progress_tracker
 from rich.console import Console
@@ -123,7 +124,13 @@ Examples:
         '--workers',
         type=int,
         default=int(get_config('WORKERS', 50)),
-        help='Number of consumer worker threads (default: 50)',
+        help='Number of consumer worker threads per video (default: 50)',
+    )
+    parser.add_argument(
+        '--parallel-videos',
+        type=int,
+        default=int(get_config('PARALLEL_VIDEOS', 3)),
+        help='Number of videos to process in parallel (default: 3)',
     )
     parser.add_argument(
         '--cooldown',
@@ -268,6 +275,7 @@ thread_num = args.validators
 worker_threads = args.workers
 cooldown_time = args.cooldown
 progress_style = args.progress_style
+parallel_videos = args.parallel_videos
 
 # 1. Get proxies
 console.print()
@@ -288,265 +296,163 @@ if len(total_proxies) > 10000:
     random.shuffle(total_proxies)
     total_proxies = total_proxies[:10000]
 
-proxy_queue = Queue()  # raw proxies to be validated
-validated_queue = Queue()  # validated proxies ready to use
-stop_event = threading.Event()  # signal to stop all threads
-checked_count = 0
-validated_count = 0
-fetched_count = 0  # count of proxies fetched
-proxy_cooldown = {}  # track last use time for each proxy
+proxy_queue = Queue()
+validated_queue = Queue()
+proxy_cooldowns = {}
 proxy_cooldown_lock = threading.Lock()
 
 
-def proxy_validator():
-    """Validates proxies and puts them in validated_queue"""
-    global checked_count, validated_count
-    while not stop_event.is_set():
-        try:
-            proxy = proxy_queue.get(timeout=1)
-        except:
-            continue
+# 3. Create video boosters
+console.print(f'\n[bold cyan]Preparing to boost {len(bv_ids)} video(s)[/bold cyan]')
 
-        with lock:
-            checked_count += 1
-
-        try:
-            requests.post('http://httpbin.org/post', proxies={'http': 'http://' + proxy}, timeout=timeout)
-            validated_queue.put(proxy)
-            with lock:
-                validated_count += 1
-        except:
-            pass
-
-        proxy_queue.task_done()
-
-
-def proxy_consumer(info_dict):
-    """Consumes validated proxies and boosts view count"""
-    global successful_hits, initial_view_count
-
-    while not stop_event.is_set():
-        try:
-            proxy = validated_queue.get(timeout=1)
-        except:
-            continue
-
-        # Check if proxy is in cooldown
-        with proxy_cooldown_lock:
-            last_used = proxy_cooldown.get(proxy, 0)
-            now = datetime.now().timestamp()
-            if now - last_used < cooldown_time:
-                # Put it back for later
-                validated_queue.put(proxy)
-                validated_queue.task_done()
-                sleep(1)
-                continue
-
-        try:
-            requests.post(
-                'http://api.bilibili.com/x/click-interface/click/web/h5',
-                proxies={'http': 'http://' + proxy},
-                headers={'User-Agent': UserAgent().random},
-                timeout=timeout,
-                data={
-                    'aid': info_dict['aid'],
-                    'cid': info_dict['cid'],
-                    'bvid': bv,
-                    'part': '1',
-                    'mid': info_dict['owner']['mid'],
-                    'jsonp': 'jsonp',
-                    'type': info_dict['desc_v2'][0]['type'] if info_dict['desc_v2'] else '1',
-                    'sub_type': '0',
-                },
-            )
-            with lock:
-                successful_hits += 1
-            with proxy_cooldown_lock:
-                proxy_cooldown[proxy] = datetime.now().timestamp()
-            # Put proxy back in queue for reuse after cooldown
-            validated_queue.put(proxy)
-        except:
-            pass
-
-        validated_queue.task_done()
-
-
-# 3. Process each video
-console.print(f'\n[bold cyan]Starting to boost {len(bv_ids)} video(s)[/bold cyan]')
-
-overall_start_time = datetime.now()
-successful_videos = []
+video_boosters = []
 failed_videos = []
 
 for video_idx, bv in enumerate(bv_ids, 1):
-    console.print(f'\n[bold yellow]Video {video_idx}/{len(bv_ids)}: {bv}[/bold yellow]')
-
     try:
         info = requests.get(
             f'https://api.bilibili.com/x/web-interface/view?bvid={bv}', headers={'User-Agent': UserAgent().random}
         ).json()['data']
         initial_view_count = info['stat']['view']
-        target_view_count = initial_view_count + increment_target
-        console.print(f'[green]Initial view count: {initial_view_count}[/green]')
-        console.print(f'[cyan]Target: +{increment_target} views (reach {target_view_count})[/cyan]')
+
+        booster = VideoBooster(
+            bv_id=bv,
+            info_dict=info,
+            initial_view=initial_view_count,
+            target_increment=increment_target,
+            cooldown=cooldown_time,
+            timeout=timeout,
+        )
+        video_boosters.append(booster)
+
+        console.print(
+            f'[yellow]Video {video_idx}/{len(bv_ids)}: {bv} (Initial: {initial_view_count}, Target: +{increment_target})[/yellow]'
+        )
     except Exception as e:
-        console.print(f'[red]Failed to get initial view count: {e}[/red]')
+        console.print(f'[red]Failed to prepare {bv}: {e}[/red]')
         failed_videos.append(bv)
-        continue
 
-    # Reset counters for this video
-    checked_count = 0
-    validated_count = 0
-    fetched_count = 0
-    successful_hits = 0
+if not video_boosters:
+    console.print('[red]No videos to process. Exiting.[/red]')
+    sys.exit(1)
 
-    # 4. Start the pipeline with progress tracker
-    tracker = get_progress_tracker(progress_style)
-    start_pipeline_time = datetime.now()
+# 4. Start the executor system
+console.print('\n[bold cyan]Starting boost system[/bold cyan]')
+console.print(f'[cyan]Validators: {thread_num}, Workers: {worker_threads}[/cyan]')
 
-    with tracker.progress_context():
-        # Create progress tasks
-        tracker.create_tasks(len(total_proxies), increment_target, bv, bv_ids, video_idx)
+overall_start_time = datetime.now()
 
-        # Start validator threads
-        validator_threads = []
-        for _ in range(thread_num):
-            thread = threading.Thread(target=proxy_validator, daemon=True)
-            thread.start()
-            validator_threads.append(thread)
+# Feed proxies to queue
+for proxy in total_proxies:
+    proxy_queue.put(proxy)
 
-        # Start consumer threads
-        consumer_threads = []
-        for _ in range(worker_threads):
-            thread = threading.Thread(target=proxy_consumer, args=(info,), daemon=True)
-            thread.start()
-            consumer_threads.append(thread)
+# Create validator
+validator = ProxyValidator(proxy_queue, validated_queue, timeout=timeout)
+validator.start(num_workers=thread_num)
 
-        # Monitor progress and check target
-        current = initial_view_count
-        check_interval = 5  # check view count every 5 seconds
-        last_check_time = datetime.now()
-        target_reached = False
-        proxy_index = 0
+# Create dispatcher
+dispatcher = JobDispatcher(validated_queue, video_boosters, num_workers=worker_threads)
+dispatcher.start()
 
-        while not target_reached:
-            # Feed proxies continuously
-            if proxy_index < len(total_proxies):
-                batch_size = min(100, len(total_proxies) - proxy_index)
-                for i in range(batch_size):
-                    proxy_queue.put(total_proxies[proxy_index])
-                    proxy_index += 1
-                    fetched_count = proxy_index
-                    tracker.update_fetch(fetched_count, len(total_proxies), f'Fetched: {fetched_count}')
+console.print(f'[green]✓ System started with {len(total_proxies)} proxies[/green]')
 
-                if proxy_index >= len(total_proxies):
-                    tracker.update_fetch(fetched_count, len(total_proxies), '✓ All fetched, recycling...')
-            else:
-                # Keep feeding validated proxies back for reuse
-                tracker.update_fetch(
-                    fetched_count, len(total_proxies), f'✓ Recycling proxies (Total: {len(total_proxies)})'
+# 5. Monitor progress
+tracker = get_progress_tracker(progress_style)
+
+with tracker.progress_context():
+    # Add validation progress bar
+    if hasattr(tracker, 'progress') and tracker.progress:
+        validate_task = tracker.progress.add_task('[blue]Validation', total=len(total_proxies), status='Starting...')
+
+    # Add video progress bars
+    for booster in video_boosters:
+        tracker.add_video_task(booster.bv_id, booster.target_increment, booster.initial_view)
+
+    # Monitor loop
+    while True:
+        sleep(0.5)
+
+        # Update validation progress
+        stats = validator.get_stats()
+        if hasattr(tracker, 'progress') and tracker.progress:
+            tracker.progress.update(
+                validate_task,
+                completed=stats['checked'],
+                status=f'Checked: {stats["checked"]}, Valid: {stats["validated"]}',
+            )
+
+        # Update video progress and check for completion
+        all_complete = True
+        for booster in video_boosters:
+            if not booster.is_complete():
+                all_complete = False
+                # Periodically update view count
+                booster.update_view_count()
+
+            progress = booster.get_progress()
+            tracker.update_video_progress(
+                progress['bv_id'], progress['current'], progress['initial'], progress['target'], progress['hits']
+            )
+
+            if booster.is_complete() and not booster.completed:
+                booster.completed = True
+                tracker.mark_video_complete(
+                    progress['bv_id'], progress['current'], progress['initial'], progress['target']
                 )
 
-            sleep(0.5)
+        if all_complete:
+            break
 
-            # Update status messages
-            tracker.update_validate(checked_count, validated_count)
-            tracker.update_consume(current, initial_view_count, increment_target, successful_hits)
+# 6. Stop workers
+validator.stop()
+dispatcher.stop()
+sleep(1)
 
-            # Periodically check view count
-            if (datetime.now() - last_check_time).total_seconds() >= check_interval:
-                try:
-                    response = requests.get(
-                        f'https://api.bilibili.com/x/web-interface/view?bvid={bv}',
-                        headers={'User-Agent': UserAgent().random},
-                    ).json()
-                    current = response['data']['stat']['view']
-                    current_increment = current - initial_view_count
-
-                    if current_increment >= increment_target:
-                        tracker.mark_complete(current, initial_view_count, increment_target, bv, video_idx)
-                        target_reached = True
-                        stop_event.set()
-                        break
-                    else:
-                        tracker.update_status(current, initial_view_count, increment_target, successful_hits)
-                except:
-                    pass
-                last_check_time = datetime.now()
-
-        # Signal all threads to stop
-        stop_event.set()
-
-        # Give threads time to finish current work
-        sleep(2)
-
-        # Final updates
-        tracker.finalize(fetched_count, checked_count, validated_count, current, increment_target)
-
-    pipeline_cost_seconds = int((datetime.now() - start_pipeline_time).total_seconds())
-
-    # Get final view count
-    try:
-        response = requests.get(
-            f'https://api.bilibili.com/x/web-interface/view?bvid={bv}', headers={'User-Agent': UserAgent().random}
-        ).json()
-        current = response['data']['stat']['view']
-    except:
-        pass
-
-    # Summary for this video
-    view_increase = current - initial_view_count
-    target_reached = view_increase >= increment_target
-
-    if target_reached:
-        successful_videos.append(bv)
-    else:
-        failed_videos.append(bv)
-
-    view_increase_color = 'green' if target_reached else 'yellow'
-    target_status = '✓ Reached!' if target_reached else '(not reached)'
-    title = (
-        f'[bold green]✓ {bv} Complete[/bold green]'
-        if target_reached
-        else f'[bold yellow]⚠ {bv} Incomplete[/bold yellow]'
+# 7. Summary
+results = []
+for booster in video_boosters:
+    progress = booster.get_progress()
+    results.append(
+        {
+            'bv': progress['bv_id'],
+            'success': progress['completed'],
+            'initial': progress['initial'],
+            'final': progress['current'],
+            'increment': progress['increment'],
+            'hits': progress['hits'],
+        }
     )
-    border_style = 'green' if target_reached else 'yellow'
+# 8. Final summary
+overall_elapsed = int((datetime.now() - overall_start_time).total_seconds())
+successful_videos = [r for r in results if r['success']]
+stats = validator.get_stats()
 
-    console.print()
-    console.print(
-        Panel.fit(
-            f'[bold]Video Summary[/bold]\n\n'
-            f'[cyan]Time Elapsed:[/cyan] {time_format(pipeline_cost_seconds)}\n'
-            f'[cyan]Proxies Checked:[/cyan] {checked_count}/{len(total_proxies)}\n'
-            f'[cyan]Valid Proxies:[/cyan] {validated_count}\n'
-            f'[cyan]Successful Hits:[/cyan] {successful_hits}\n'
-            f'[cyan]Success Rate:[/cyan] {(successful_hits / validated_count * 100 if validated_count > 0 else 0):.2f}%\n\n'
-            f'[cyan]Initial Views:[/cyan] {initial_view_count}\n'
-            f'[cyan]Final Views:[/cyan] {current}\n'
-            f'[{view_increase_color}]View Increase:[/{view_increase_color}] +{view_increase}\n'
-            f'[{view_increase_color}]Target Increment:[/{view_increase_color}] +{increment_target} {target_status}',
-            title=title,
-            border_style=border_style,
+console.print()
+console.print(
+    Panel.fit(
+        f'[bold]Overall Summary[/bold]\n\n'
+        f'[cyan]Total Time:[/cyan] {time_format(overall_elapsed)}\n'
+        f'[cyan]Videos Processed:[/cyan] {len(results)}/{len(bv_ids)}\n'
+        f'[cyan]Successful:[/cyan] {len(successful_videos)}\n'
+        f'[cyan]Failed:[/cyan] {len(failed_videos)}\n\n'
+        f'[cyan]Proxies Checked:[/cyan] {stats["checked"]}\n'
+        f'[cyan]Valid Proxies:[/cyan] {stats["validated"]}\n'
+        f'[cyan]Validation Rate:[/cyan] {(stats["validated"] / stats["checked"] * 100 if stats["checked"] > 0 else 0):.1f}%',
+        title='[bold green]✓ Complete[/bold green]',
+        border_style='green',
+    )
+)
+
+if successful_videos:
+    console.print('\n[bold green]Successful Videos:[/bold green]')
+    for r in successful_videos:
+        console.print(
+            f'  • {r["bv"]}: {r["initial"]} → {r["final"]} (+{r["increment"]}) in {time_format(r["elapsed"])}'
         )
-    )
 
-# Overall summary for multiple videos
-if len(bv_ids) > 1:
-    overall_time = int((datetime.now() - overall_start_time).total_seconds())
-    console.print()
-    console.print(
-        Panel.fit(
-            f'[bold]Overall Summary[/bold]\n\n'
-            f'[cyan]Total Time:[/cyan] {time_format(overall_time)}\n'
-            f'[cyan]Total Videos:[/cyan] {len(bv_ids)}\n'
-            f'[green]Successful:[/green] {len(successful_videos)}\n'
-            f'[red]Failed:[/red] {len(failed_videos)}\n\n'
-            + ('\n'.join(f'[green]✓[/green] {vid}' for vid in successful_videos) if successful_videos else '')
-            + ('\n' if successful_videos and failed_videos else '')
-            + ('\n'.join(f'[red]✗[/red] {vid}' for vid in failed_videos) if failed_videos else ''),
-            title='[bold cyan]Batch Complete[/bold cyan]',
-            border_style='green' if not failed_videos else 'yellow',
-        )
-    )
+if failed_videos:
+    console.print('\n[bold yellow]Failed Videos:[/bold yellow]')
+    for bv in failed_videos:
+        console.print(f'  • {bv}')
 
 console.print()

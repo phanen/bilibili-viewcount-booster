@@ -66,6 +66,7 @@ class RichProgressTracker(ProgressTracker):
         super().__init__()
         self.console = Console()
         self.progress = None
+        self.video_progress = {}  # {bv_id: task_id}
 
     @contextmanager
     def progress_context(self):
@@ -81,6 +82,34 @@ class RichProgressTracker(ProgressTracker):
         )
         with self.progress as p:
             yield p
+
+    def add_video_task(self, bv, increment_target, initial_view):
+        """Add a new video task to the progress tracker."""
+        if self.progress:
+            task_id = self.progress.add_task(
+                f'[green]{bv}', total=increment_target, status=f'Starting (Initial: {initial_view})'
+            )
+            self.video_progress[bv] = task_id
+            return task_id
+        return None
+
+    def update_video_progress(self, bv, current, initial, target, hits):
+        """Update progress for a specific video."""
+        if self.progress and bv in self.video_progress:
+            current_increment = current - initial
+            self.progress.update(
+                self.video_progress[bv],
+                completed=min(current_increment, target),
+                status=f'Views: {current} (+{current_increment}), Hits: {hits}',
+            )
+
+    def mark_video_complete(self, bv, current, initial, target):
+        """Mark a video as complete."""
+        if self.progress and bv in self.video_progress:
+            current_increment = current - initial
+            self.progress.update(
+                self.video_progress[bv], completed=target, status=f'✓ Done! {current} (+{current_increment})'
+            )
 
     def create_tasks(self, total_proxies, increment_target, bv, bv_ids, video_idx):
         """Create rich progress tasks."""
@@ -155,6 +184,7 @@ class CIProgressTracker(ProgressTracker):
 
     def __init__(self):
         super().__init__()
+        self.video_progress = {}
         self.last_fetch_status = None
         self.last_validate_log = 0
         self.last_consume_log = 0
@@ -167,6 +197,25 @@ class CIProgressTracker(ProgressTracker):
 
         with nullcontext():
             yield None
+
+    def add_video_task(self, bv, increment_target, initial_view):
+        """Add a new video task."""
+        self.video_progress[bv] = {'target': increment_target, 'initial': initial_view}
+        print(f'[CI] Video {bv}: Starting (Initial: {initial_view}, Target: +{increment_target})', flush=True)
+
+    def update_video_progress(self, bv, current, initial, target, hits):
+        """Update progress for a specific video."""
+        current_increment = current - initial
+        if current_increment % 10 == 0 or current_increment >= target:
+            print(
+                f'[CI] {bv}: Views={current} (+{current_increment}/{target}), Hits={hits}',
+                flush=True,
+            )
+
+    def mark_video_complete(self, bv, current, initial, target):
+        """Mark a video as complete."""
+        current_increment = current - initial
+        print(f'[CI] {bv}: ✓ Complete! {current} (+{current_increment})', flush=True)
 
     def create_tasks(self, total_proxies, increment_target, bv, bv_ids, video_idx):
         """No tasks needed for CI mode."""
