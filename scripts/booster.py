@@ -48,6 +48,7 @@ _progress_obj = None
 _fetch_task = None
 _validate_task = None
 _consume_task = None
+is_ci = os.getenv('CI', '').lower() in ('true', '1', 'yes')
 
 
 def parse_args():
@@ -136,6 +137,12 @@ Examples:
     )
     parser.add_argument(
         '--timeout', type=int, default=int(get_config('TIMEOUT', 3)), help='Request timeout in seconds (default: 3)'
+    )
+    parser.add_argument(
+        '--blacklist',
+        type=str,
+        default=get_config('BLACKLIST', ''),
+        help='Comma-separated list of BV IDs to exclude (blacklist)',
     )
 
     args = parser.parse_args()
@@ -241,6 +248,18 @@ elif args.mid:
         sys.exit(1)
     console.print(f'[green]Found {len(bv_ids)} videos[/green]')
 
+# Apply blacklist filter
+blacklist = [b.strip() for b in args.blacklist.split(',') if b.strip()]
+if blacklist:
+    original_count = len(bv_ids)
+    bv_ids = [bv for bv in bv_ids if bv not in blacklist]
+    filtered_count = original_count - len(bv_ids)
+    if filtered_count > 0:
+        console.print(f'[yellow]Filtered out {filtered_count} blacklisted video(s)[/yellow]')
+    if not bv_ids:
+        console.print('[red]All videos are blacklisted, nothing to process[/red]')
+        sys.exit(0)
+
 increment_target = args.increment
 timeout = args.timeout
 thread_num = args.validators
@@ -275,11 +294,6 @@ fetched_count = 0  # count of proxies fetched
 proxy_cooldown = {}  # track last use time for each proxy
 proxy_cooldown_lock = threading.Lock()
 
-# Progress task references (set inside Progress context)
-_fetch_task = None
-_validate_task = None
-_consume_task = None
-
 
 def proxy_validator():
     """Validates proxies and puts them in validated_queue"""
@@ -301,8 +315,10 @@ def proxy_validator():
         except:
             pass
 
-        if _validate_task and _progress_obj:
+        if _validate_task and _progress_obj and not is_ci:
             _progress_obj.update(_validate_task, completed=checked_count)
+        elif is_ci and checked_count % 100 == 0:  # Log every 100 in CI
+            print(f'[CI] Validation: Checked={checked_count}, Valid={validated_count}', flush=True)
         proxy_queue.task_done()
 
 
@@ -348,8 +364,10 @@ def proxy_consumer(info_dict):
                 successful_hits += 1
             with proxy_cooldown_lock:
                 proxy_cooldown[proxy] = datetime.now().timestamp()
-            if _consume_task and _progress_obj:
+            if _consume_task and _progress_obj and not is_ci:
                 _progress_obj.update(_consume_task, completed=successful_hits)
+            elif is_ci and successful_hits % 10 == 0:  # Log every 10 hits in CI
+                print(f'[CI] Consuming: Hits={successful_hits}', flush=True)
             # Put proxy back in queue for reuse after cooldown
             validated_queue.put(proxy)
         except:
@@ -390,31 +408,44 @@ for video_idx, bv in enumerate(bv_ids, 1):
     # 4. Start the pipeline with Rich progress bars
     start_pipeline_time = datetime.now()
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn('[progress.description]{task.description}'),
-        BarColumn(),
-        TaskProgressColumn(),
-        TextColumn('[cyan]{task.fields[status]}[/cyan]'),
-        console=console,
-        transient=False,
-    ) as _progress:
+    if not is_ci:
+        # Use rich Progress for interactive terminal
+        progress_ctx = Progress(
+            SpinnerColumn(),
+            TextColumn('[progress.description]{task.description}'),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn('[cyan]{task.fields[status]}[/cyan]'),
+            console=console,
+            transient=False,
+        )
+    else:
+        # Use dummy context manager for CI
+        from contextlib import nullcontext
+
+        progress_ctx = nullcontext()
+        print('[CI] Starting pipeline (CI mode - simplified logging)', flush=True)
+
+    with progress_ctx as _progress:
         # Set global progress references
-        _progress_obj = _progress
+        _progress_obj = _progress if not is_ci else None
 
         # Create progress tasks
-        if len(bv_ids) > 1:
-            _video_task = _progress.add_task(
-                '[magenta]Processing videos', total=len(bv_ids), status=f'Video {video_idx}/{len(bv_ids)}: {bv}'
+        if not is_ci and _progress_obj:
+            if len(bv_ids) > 1:
+                _video_task = _progress.add_task(
+                    '[magenta]Processing videos', total=len(bv_ids), status=f'Video {video_idx}/{len(bv_ids)}: {bv}'
+                )
+            else:
+                _video_task = None
+
+            _fetch_task = _progress.add_task('[yellow]Fetching proxies', total=len(total_proxies), status='')
+            _validate_task = _progress.add_task('[blue]Validating proxies', total=None, status='')
+            _consume_task = _progress.add_task(
+                f'[green]Boosting {bv}', total=increment_target, status=f'Target: +{increment_target}'
             )
         else:
-            _video_task = None
-
-        _fetch_task = _progress.add_task('[yellow]Fetching proxies', total=len(total_proxies), status='')
-        _validate_task = _progress.add_task('[blue]Validating proxies', total=None, status='')
-        _consume_task = _progress.add_task(
-            f'[green]Boosting {bv}', total=increment_target, status=f'Target: +{increment_target}'
-        )
+            _video_task = _fetch_task = _validate_task = _consume_task = None
 
     # Start validator threads
     validator_threads = []
@@ -445,26 +476,35 @@ for video_idx, bv in enumerate(bv_ids, 1):
                 proxy_queue.put(total_proxies[proxy_index])
                 proxy_index += 1
                 fetched_count = proxy_index
-                _progress_obj.update(_fetch_task, completed=fetched_count, status=f'Fetched: {fetched_count}')
+                if _progress_obj and _fetch_task:
+                    _progress_obj.update(_fetch_task, completed=fetched_count, status=f'Fetched: {fetched_count}')
+                elif is_ci and proxy_index % 500 == 0:
+                    print(f'[CI] Fetched: {fetched_count}/{len(total_proxies)}', flush=True)
 
             if proxy_index >= len(total_proxies):
-                _progress_obj.update(_fetch_task, status='✓ All fetched, recycling...')
+                if _progress_obj and _fetch_task:
+                    _progress_obj.update(_fetch_task, status='✓ All fetched, recycling...')
+                elif is_ci:
+                    print('[CI] All proxies fetched, recycling...', flush=True)
         else:
             # Keep feeding validated proxies back for reuse
-            _progress_obj.update(_fetch_task, status=f'✓ Recycling proxies (Total: {len(total_proxies)})')
+            if _progress_obj and _fetch_task:
+                _progress_obj.update(_fetch_task, status=f'✓ Recycling proxies (Total: {len(total_proxies)})')
 
         sleep(0.5)
 
         # Update status messages
-        _progress_obj.update(
-            _validate_task, completed=checked_count, status=f'Checked: {checked_count}, Valid: {validated_count}'
-        )
+        if _progress_obj and _validate_task:
+            _progress_obj.update(
+                _validate_task, completed=checked_count, status=f'Checked: {checked_count}, Valid: {validated_count}'
+            )
         current_increment = current - initial_view_count
-        _progress_obj.update(
-            _consume_task,
-            completed=min(current_increment, increment_target),
-            status=f'Current: {current} (+{current_increment}), Hits: {successful_hits}',
-        )
+        if _progress_obj and _consume_task:
+            _progress_obj.update(
+                _consume_task,
+                completed=min(current_increment, increment_target),
+                status=f'Current: {current} (+{current_increment}), Hits: {successful_hits}',
+            )
 
         # Periodically check view count
         if (datetime.now() - last_check_time).total_seconds() >= check_interval:
@@ -477,16 +517,24 @@ for video_idx, bv in enumerate(bv_ids, 1):
                 current_increment = current - initial_view_count
 
                 if current_increment >= increment_target:
-                    _progress_obj.update(
-                        _consume_task,
-                        completed=increment_target,
-                        status=f'✓ Target reached! {current} (+{current_increment})',
-                    )
-                    if _video_task is not None:
+                    if _progress_obj and _consume_task:
+                        _progress_obj.update(
+                            _consume_task,
+                            completed=increment_target,
+                            status=f'✓ Target reached! {current} (+{current_increment})',
+                        )
+                    if _video_task is not None and _progress_obj:
                         _progress_obj.update(_video_task, completed=video_idx, status=f'✓ {bv} complete')
+                    elif is_ci:
+                        print(f'[CI] ✓ Target reached! {bv}: {current} (+{current_increment})', flush=True)
                     target_reached = True
                     stop_event.set()
                     break
+                elif is_ci:
+                    print(
+                        f'[CI] Status: Views={current} (+{current_increment}/{increment_target}), Hits={successful_hits}',
+                        flush=True,
+                    )
             except:
                 pass
             last_check_time = datetime.now()

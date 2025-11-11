@@ -27,6 +27,11 @@ on:
         required: false
         type: number
         default: 300
+      blacklist:
+        description: "Comma-separated list of BV IDs to exclude"
+        required: false
+        type: string
+        default: ""
     secrets:
       user_mid_secret:
         description: "Bilibili User MID from secrets"
@@ -73,6 +78,7 @@ jobs:
             --workers ${{ inputs.workers }} \
             --cooldown ${{ inputs.cooldown }} \
             --cookies cookies.txt \
+            ${{ inputs.blacklist && format('--blacklist {0}', inputs.blacklist) || '' }} \
             ${{ secrets.proxy_url && format('--proxy-url {0}', secrets.proxy_url) || '' }}
 
       - name: Upload logs
