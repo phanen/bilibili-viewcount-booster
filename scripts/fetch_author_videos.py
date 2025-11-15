@@ -97,7 +97,7 @@ def enc_wbi(params: dict, img_key: str, sub_key: str):
     return params
 
 
-def get_wbi_keys(session):
+def get_wbi_keys(session: requests.Session):
     """获取最新的 img_key 和 sub_key"""
     resp = session.get('https://api.bilibili.com/x/web-interface/nav')
     resp.raise_for_status()

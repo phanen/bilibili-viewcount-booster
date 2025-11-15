@@ -23,16 +23,8 @@ jobs:
           repository: phanen/bilibili-viewcount-booster
           ref: main
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Install uv
         run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Install dependencies
-        run: uv sync
 
       # header matter? https://github.com/yt-dlp/yt-dlp/issues/12467#issuecomment-2677591696
       - name: Create cookies file
@@ -45,14 +37,6 @@ jobs:
           uv run python scripts/booster.py \
             --cookies cookies.txt \
             ${{ inputs.cli_flags }}
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v5
-        with:
-          name: boost-logs-${{ github.run_number }}
-          path: "*.log"
-          retention-days: 30
 
       - name: Cleanup
         if: always()
