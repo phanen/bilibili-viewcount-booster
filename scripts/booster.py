@@ -24,8 +24,7 @@ import urllib3
 
 # Local imports
 from executor import JobDispatcher, ProxyValidator, VideoBooster
-from fake_useragent import UserAgent
-from platforms import get_platform, PLATFORMS
+from platforms import PLATFORMS, get_platform
 from progress_tracker import get_progress_tracker
 from rich.console import Console
 from rich.panel import Panel

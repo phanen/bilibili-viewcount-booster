@@ -8,7 +8,6 @@ from queue import Empty
 from time import sleep
 
 import requests
-from fake_useragent import UserAgent
 from platforms.base import Platform
 
 

@@ -31,7 +31,7 @@ class BilibiliPlatform(Platform):
         )
         data = response.json()
         if data['code'] != 0:
-            raise Exception(f"Failed to fetch video info: {data.get('message', 'Unknown error')}")
+            raise Exception(f'Failed to fetch video info: {data.get("message", "Unknown error")}')
         return data['data']
 
     def boost_view(self, video_id: str, info_dict: dict, proxy: str, timeout: int = 5) -> bool:
