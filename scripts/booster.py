@@ -1,8 +1,11 @@
 """
-Bilibili View Count Booster - Main Script
+Multi-Platform View Count Booster - Main Script
 
-Simulates video views by sending HTTP POST requests to Bilibili's playback API
-through validated proxy servers.
+Simulates video views by sending HTTP requests to platform APIs
+through validated proxy servers. Supports multiple platforms:
+- Bilibili (default)
+- Xiaohongshu (Little Red Book)
+
 1. Fetch Proxies - Download free proxy lists from public sources
 2. Validate Proxies (75 threads) - Test proxies against httpbin.org
 3. Boost Views (50 threads) - Send view requests through valid proxies
@@ -21,7 +24,7 @@ import urllib3
 
 # Local imports
 from executor import JobDispatcher, ProxyValidator, VideoBooster
-from fake_useragent import UserAgent
+from platforms import PLATFORMS, get_platform
 from progress_tracker import get_progress_tracker
 from rich.console import Console
 from rich.panel import Panel
@@ -42,28 +45,54 @@ def parse_args():
         return os.getenv(key) or env_file.get(key) or default
 
     parser = argparse.ArgumentParser(
-        description='Bilibili View Count Booster - Non-blocking pipeline for boosting video views',
+        description='Multi-Platform View Count Booster - Non-blocking pipeline for boosting video views',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single video
-  python booster.py --bvids BV1xxx --increment 1000
+  # Bilibili - Single video
+  python booster.py --platform bilibili --video-ids BV1xxx --increment 1000
   
-  # Multiple videos
-  python booster.py --bvids BV1xxx BV2yyy -n 100
+  # Bilibili - Multiple videos
+  python booster.py --platform bilibili --video-ids BV1xxx BV2yyy -n 100
   
-  # All videos from a user
-  python booster.py --mid 123456 -n 50 --cookies cookies.txt
+  # Bilibili - All videos from a user
+  python booster.py --platform bilibili --user-id 123456 -n 50 --cookies cookies.txt
+  
+  # Xiaohongshu - Single note
+  python booster.py --platform xiaohongshu --video-ids 63f9a8b0000000001f03e6a1 -n 100
   
   # Custom proxy source
-  python booster.py --bv BV1xxx -n 1000 --proxy-url https://example.com/proxies.txt
+  python booster.py --video-ids BV1xxx -n 1000 --proxy-url https://example.com/proxies.txt
+  
+  # Backward compatibility (defaults to Bilibili)
+  python booster.py --bvids BV1xxx -n 100
         """,
+    )
+
+    # Platform selection
+    parser.add_argument(
+        '--platform',
+        '-p',
+        choices=list(PLATFORMS.keys()),
+        default=get_config('PLATFORM', 'bilibili'),
+        help='Platform to boost views on (default: bilibili)',
     )
 
     # Video selection
     video_group = parser.add_mutually_exclusive_group(required=False)
-    video_group.add_argument('--bvids', '--bv', nargs='+', default=None, help='One or more BV IDs to boost')
-    video_group.add_argument('--mid', type=int, help='User MID to boost all their videos')
+    video_group.add_argument(
+        '--video-ids',
+        '--vid',
+        nargs='+',
+        default=None,
+        help='One or more video/note IDs to boost (platform-specific format)',
+    )
+    video_group.add_argument(
+        '--user-id', '--uid', type=str, help='User ID to boost all their videos (platform-specific format)'
+    )
+    # Backward compatibility with Bilibili-specific args
+    video_group.add_argument('--bvids', '--bv', nargs='+', default=None, help='[DEPRECATED] Use --video-ids instead')
+    video_group.add_argument('--mid', type=int, help='[DEPRECATED] Use --user-id instead')
 
     parser.add_argument(
         '--increment',
@@ -110,7 +139,7 @@ Examples:
 
     # Filtering
     parser.add_argument(
-        '--blacklist', type=str, default=get_config('BLACKLIST', ''), help='Comma-separated BV IDs to exclude'
+        '--blacklist', type=str, default=get_config('BLACKLIST', ''), help='Comma-separated video IDs to exclude'
     )
 
     # Display
@@ -123,19 +152,30 @@ Examples:
 
     args = parser.parse_args()
 
+    # Handle backward compatibility with deprecated args
+    if args.bvids and not args.video_ids:
+        args.video_ids = args.bvids
+        args.platform = 'bilibili'
+    if args.mid and not args.user_id:
+        args.user_id = str(args.mid)
+        args.platform = 'bilibili'
+
     # Handle env fallbacks
-    if not args.mid and get_config('BILIBILI_USER_MID'):
-        args.mid = int(get_config('BILIBILI_USER_MID'))
-    if not args.bvids and not args.mid and get_config('BV_ID'):
-        args.bvids = [get_config('BV_ID')]
+    if not args.user_id and get_config('BILIBILI_USER_MID'):
+        args.user_id = get_config('BILIBILI_USER_MID')
+        if args.platform == 'bilibili':
+            args.platform = 'bilibili'
+    if not args.video_ids and not args.user_id and get_config('BV_ID'):
+        args.video_ids = [get_config('BV_ID')]
+        args.platform = 'bilibili'
 
     # Validation
-    if not args.bvids and not args.mid:
-        parser.error('Video selection required: --bvids or --mid')
+    if not args.video_ids and not args.user_id:
+        parser.error('Video selection required: --video-ids or --user-id (or deprecated --bvids/--mid)')
     if not args.increment:
         parser.error('Target increment required: --increment or -n')
-    if args.mid and not args.cookies:
-        parser.error('--cookies required when using --mid')
+    if args.user_id and not args.cookies:
+        parser.error('--cookies required when using --user-id')
 
     return args
 
@@ -196,36 +236,34 @@ def fetch_proxies_from_archive() -> list[str]:
     return []
 
 
-def get_video_list(args):
-    """Get list of BV IDs to process based on arguments."""
-    if args.bvids:
-        return args.bvids
+def get_video_list(args, platform):
+    """Get list of video IDs to process based on arguments."""
+    if args.video_ids:
+        return args.video_ids
 
-    if args.mid:
-        from fetch_author_videos import get_user_videos
-
-        console.print(f'[cyan]Fetching videos from user {args.mid}...[/cyan]')
-        bv_ids = get_user_videos(args.mid, cookies_file=args.cookies)
-        if not bv_ids:
+    if args.user_id:
+        console.print(f'[cyan]Fetching videos from user {args.user_id} on {platform.get_name()}...[/cyan]')
+        video_ids = platform.get_user_videos(args.user_id, cookies_file=args.cookies)
+        if not video_ids:
             console.print('[red]No videos found for user[/red]')
             sys.exit(1)
-        console.print(f'[green]Found {len(bv_ids)} videos[/green]')
-        return bv_ids
+        console.print(f'[green]Found {len(video_ids)} videos[/green]')
+        return video_ids
 
     return []
 
 
-def apply_blacklist(bv_ids, blacklist_str):
-    """Apply blacklist filter to BV IDs."""
+def apply_blacklist(video_ids, blacklist_str):
+    """Apply blacklist filter to video IDs."""
     if not blacklist_str:
-        return bv_ids
+        return video_ids
 
     blacklist = [b.strip() for b in blacklist_str.split(',') if b.strip()]
     if not blacklist:
-        return bv_ids
+        return video_ids
 
-    original_count = len(bv_ids)
-    filtered_ids = [bv for bv in bv_ids if bv not in blacklist]
+    original_count = len(video_ids)
+    filtered_ids = [vid for vid in video_ids if vid not in blacklist]
     filtered_count = original_count - len(filtered_ids)
 
     if filtered_count > 0:
@@ -237,38 +275,36 @@ def apply_blacklist(bv_ids, blacklist_str):
     return filtered_ids
 
 
-def prepare_video_boosters(bv_ids, increment_target, cooldown_time, timeout):
+def prepare_video_boosters(video_ids, increment_target, platform, cooldown_time, timeout):
     """Prepare VideoBooster instances for each video."""
-    console.print(f'\n[bold cyan]Preparing to boost {len(bv_ids)} video(s)[/bold cyan]')
+    console.print(f'\n[bold cyan]Preparing to boost {len(video_ids)} video(s) on {platform.get_name()}[/bold cyan]')
 
     video_boosters = []
     failed_videos = []
 
-    for video_idx, bv in enumerate(bv_ids, 1):
+    for video_idx, video_id in enumerate(video_ids, 1):
         try:
-            info = requests.get(
-                f'https://api.bilibili.com/x/web-interface/view?bvid={bv}',
-                headers={'User-Agent': UserAgent().random},
-            ).json()['data']
-            initial_view_count = info['stat']['view']
+            info = platform.get_video_info(video_id)
+            initial_view_count = info.get('stat', {}).get('view', 0) if 'stat' in info else 0
 
             booster = VideoBooster(
-                bv_id=bv,
+                video_id=video_id,
                 info_dict=info,
                 initial_view=initial_view_count,
                 target_increment=increment_target,
+                platform=platform,
                 cooldown=cooldown_time,
                 timeout=timeout,
             )
             video_boosters.append(booster)
 
             console.print(
-                f'[yellow]Video {video_idx}/{len(bv_ids)}: {bv} '
+                f'[yellow]Video {video_idx}/{len(video_ids)}: {video_id} '
                 f'(Initial: {initial_view_count}, Target: +{increment_target})[/yellow]'
             )
         except Exception as e:
-            console.print(f'[red]Failed to prepare {bv}: {e}[/red]')
-            failed_videos.append(bv)
+            console.print(f'[red]Failed to prepare {video_id}: {e}[/red]')
+            failed_videos.append(video_id)
 
     return video_boosters, failed_videos
 
@@ -427,9 +463,13 @@ def main():
     # Parse arguments
     args = parse_args()
 
+    # Get platform
+    platform = get_platform(args.platform)
+    console.print(f'[bold cyan]Platform: {platform.get_name()}[/bold cyan]')
+
     # Get video list
-    bv_ids = get_video_list(args)
-    bv_ids = apply_blacklist(bv_ids, args.blacklist)
+    video_ids = get_video_list(args, platform)
+    video_ids = apply_blacklist(video_ids, args.blacklist)
 
     # Get proxies
     console.print()
@@ -451,7 +491,9 @@ def main():
         total_proxies = total_proxies[:10000]
 
     # Prepare video boosters
-    video_boosters, failed_videos = prepare_video_boosters(bv_ids, args.increment, args.cooldown, args.timeout)
+    video_boosters, failed_videos = prepare_video_boosters(
+        video_ids, args.increment, platform, args.cooldown, args.timeout
+    )
 
     if not video_boosters:
         console.print('[red]No videos to process. Exiting.[/red]')
@@ -464,7 +506,7 @@ def main():
     results, stats, overall_start_time, interrupted = run_pipeline(args, video_boosters, total_proxies)
 
     # Print summary
-    print_summary(results, stats, failed_videos, bv_ids, overall_start_time, interrupted)
+    print_summary(results, stats, failed_videos, video_ids, overall_start_time, interrupted)
 
 
 if __name__ == '__main__':

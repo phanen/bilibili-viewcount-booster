@@ -8,7 +8,7 @@ from queue import Empty
 from time import sleep
 
 import requests
-from fake_useragent import UserAgent
+from platforms.base import Platform
 
 
 class ProxyValidator:
@@ -67,11 +67,14 @@ class ProxyValidator:
 class VideoBooster:
     """Manages boosting for a single video."""
 
-    def __init__(self, bv_id, info_dict, initial_view, target_increment, cooldown=300, timeout=5):
-        self.bv_id = bv_id
+    def __init__(
+        self, video_id, info_dict, initial_view, target_increment, platform: Platform, cooldown=300, timeout=5
+    ):
+        self.video_id = video_id
         self.info_dict = info_dict
         self.initial_view = initial_view
         self.target_increment = target_increment
+        self.platform = platform
         self.cooldown = cooldown
         self.timeout = timeout
 
@@ -82,6 +85,9 @@ class VideoBooster:
         self.completed = False
         self.start_time = datetime.now()
         self.end_time = None
+
+        # For backward compatibility with progress tracking
+        self.bv_id = video_id
 
     def can_use_proxy(self, proxy):
         """Check if proxy can be used (not in cooldown)."""
@@ -95,41 +101,17 @@ class VideoBooster:
         if not self.can_use_proxy(proxy):
             return False
 
-        try:
-            requests.post(
-                'http://api.bilibili.com/x/click-interface/click/web/h5',
-                proxies={'http': 'http://' + proxy},
-                headers={'User-Agent': UserAgent().random},
-                timeout=self.timeout,
-                verify=False,
-                data={
-                    'aid': self.info_dict['aid'],
-                    'cid': self.info_dict['cid'],
-                    'bvid': self.bv_id,
-                    'part': '1',
-                    'mid': self.info_dict['owner']['mid'],
-                    'jsonp': 'jsonp',
-                    'type': self.info_dict['desc_v2'][0]['type'] if self.info_dict['desc_v2'] else '1',
-                    'sub_type': '0',
-                },
-            )
+        success = self.platform.boost_view(self.video_id, self.info_dict, proxy, self.timeout)
+        if success:
             with self.lock:
                 self.hits += 1
                 self.proxy_cooldowns[proxy] = datetime.now().timestamp()
-            return True
-        except:
-            return False
+        return success
 
     def update_view_count(self):
-        """Fetch current view count from Bilibili."""
+        """Fetch current view count from platform."""
         try:
-            response = requests.get(
-                f'https://api.bilibili.com/x/web-interface/view?bvid={self.bv_id}',
-                headers={'User-Agent': UserAgent().random},
-                timeout=self.timeout,
-            ).json()
-            with self.lock:
-                self.current_view = response['data']['stat']['view']
+            self.current_view = self.platform.get_current_views(self.video_id)
             return self.current_view
         except:
             return self.current_view
